@@ -1,0 +1,30 @@
+name: Compile
+
+on:
+ - push
+ - pull_request
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build -r --bin enterprise
+    - uses: actions/upload-artifact@v4
+      with:
+        name: enterprise
+        path: target/release/enterprise
+  build_windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build -r --bin enterprise
+    - uses: actions/upload-artifact@v4
+      with:
+        name: enterprise-windows
+        path: target/release/enterprise.exe
