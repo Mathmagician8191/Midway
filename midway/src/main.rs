@@ -175,7 +175,7 @@ fn main() {
         for (_, connection) in &mut connections {
           connection
             .stream
-            .write_all(format!("sunk {name}").as_bytes())
+            .write_all(format!("sunk {name}\n").as_bytes())
             .ok();
         }
       }
