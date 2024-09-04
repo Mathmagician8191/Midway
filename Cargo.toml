@@ -1,0 +1,21 @@
+[workspace]
+members = ["enterprise", "midway"]
+
+[workspace.package]
+authors = ["Mathmagician8191 <50558333+Mathmagician8191@users.noreply.github.com>"]
+version = "0.1.0"
+repository = "https://github.com/Mathmagician8191/Midway"
+license = "AGPL-3.0"
+edition = "2021"
+
+[profile.dev]
+opt-level = 3
+debug = 0
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = 0

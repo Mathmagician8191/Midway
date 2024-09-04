@@ -1,0 +1,10 @@
+[package]
+name = "midway"
+authors.workspace = true
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+rand = "0.8.5"
