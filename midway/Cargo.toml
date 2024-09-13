@@ -7,4 +7,6 @@ license.workspace = true
 edition.workspace = true
 
 [dependencies]
+enum-iterator = "2.1.0"
 rand = "0.8.5"
+random-pick = "1.2.16"

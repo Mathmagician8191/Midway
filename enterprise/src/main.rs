@@ -1,8 +1,8 @@
 use eframe::epaint::PathStroke;
 use eframe::{egui, run_native, App, Frame, NativeOptions};
 use egui::{
-  include_image, pos2, vec2, Align2, CentralPanel, Color32, Context, FontId, Image, Key, Pos2,
-  Rect, Rounding, Ui, Vec2, ViewportBuilder,
+  include_image, pos2, vec2, Align2, CentralPanel, Color32, Context, FontId, Image, ImageSource,
+  Key, Pos2, Rect, Rounding, Ui, Vec2, ViewportBuilder,
 };
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -11,8 +11,33 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::spawn;
 
-const SCREEN_SIZE: Pos2 = Pos2::new(1280.0, 800.0);
-const SHIP_SIZE: f32 = 60.0;
+const LONG_DEGREE_INTERVAL: f32 = 40_000_000.0 / 360.0;
+const LAT_DEGREE_INTERVAL: f32 = 10_000_000.0 / 180.0;
+const LONG_MINUTE_INTERVAL: f32 = LONG_DEGREE_INTERVAL / 60.0;
+const LAT_MINUTE_INTERVAL: f32 = LAT_DEGREE_INTERVAL / 60.0;
+const LINE_INTERVAL: f32 = LAT_MINUTE_INTERVAL;
+
+const TEXTURES: &[ImageSource] = &[
+  include_image!("../../resources/Missing.png"),
+  include_image!("../../resources/DestroyerEscort.png"),
+  include_image!("../../resources/Destroyer.png"),
+  include_image!("../../resources/LightCruiser.png"),
+  include_image!("../../resources/HeavyCruiser.png"),
+  include_image!("../../resources/BattleCruiser.png"),
+  include_image!("../../resources/Battleship.png"),
+  include_image!("../../resources/LazerKiwi.png"),
+  include_image!("../../resources/Kraken.png"),
+];
+
+struct Ship {
+  coords: Pos2,
+  angle: f32,
+  velocity: f32,
+  texture: usize,
+  colour: Color32,
+  size: f32,
+  health: f32,
+}
 
 #[derive(Default)]
 struct ShipData {
@@ -21,16 +46,19 @@ struct ShipData {
 }
 
 enum MidwayMessage {
-  Ship(String, (Pos2, f32)),
+  Ship(String, Ship),
   Sunk(String),
+  Radius(f32),
 }
 
 struct MidwayData {
   rx: Receiver<MidwayMessage>,
   stream: TcpStream,
   name: String,
+  scale: i32,
+  radius: Option<f32>,
   ship_data: ShipData,
-  ships: HashMap<String, (Pos2, f32)>,
+  ships: HashMap<String, Ship>,
 }
 
 impl MidwayData {
@@ -39,6 +67,8 @@ impl MidwayData {
       rx,
       stream,
       name,
+      scale: 0,
+      radius: None,
       ship_data: ShipData::default(),
       ships: HashMap::new(),
     }
@@ -56,6 +86,33 @@ impl Default for Window {
   }
 }
 
+struct RenderState {
+  scale: f32,
+  offset: Pos2,
+}
+
+impl RenderState {
+  fn new(scale: f32, center: Pos2, screen_center: Pos2) -> Self {
+    Self {
+      scale,
+      offset: screen_center - center.to_vec2() * scale,
+    }
+  }
+
+  fn scale(&self, size: f32) -> f32 {
+    size * self.scale
+  }
+
+  fn transform(&self, position: Pos2) -> Pos2 {
+    position * self.scale + self.offset.to_vec2()
+  }
+
+  // Screen space to real world
+  fn reverse_transform(&self, position: Pos2) -> Pos2 {
+    (position - self.offset.to_vec2()) / self.scale
+  }
+}
+
 #[derive(Default)]
 struct Enterprise {
   window: Window,
@@ -68,8 +125,8 @@ impl App for Enterprise {
         if let Some(stream) = draw_main_menu(ui, name, ip, port, message) {
           let (tx, rx) = channel();
           let stream_clone = stream.try_clone().expect("Try-clone broke");
-          spawn(|| handle_midway_connection(stream_clone, tx));
-          self.window = Window::Midway(MidwayData::new(name.to_string(), rx, stream));
+          spawn(move || handle_midway_connection(stream_clone, &tx));
+          self.window = Window::Midway(MidwayData::new(name.clone(), rx, stream));
         }
       }
       Window::Midway(ref mut data) => draw_midway(ui, data),
@@ -115,7 +172,8 @@ fn draw_main_menu(
   None
 }
 
-fn draw_midway(ui: &mut Ui, data: &mut MidwayData) {
+fn draw_midway(ui: &Ui, data: &mut MidwayData) {
+  let screen_size = ui.clip_rect().right_bottom();
   ui.ctx().input(|i| {
     data.ship_data.helm = match (i.key_down(Key::A), i.key_down(Key::D)) {
       (true, false) => -1.0,
@@ -137,6 +195,15 @@ fn draw_midway(ui: &mut Ui, data: &mut MidwayData) {
       }
       _ => (),
     };
+    if i.key_down(Key::V) {
+      data.stream.write_all(b"anchor\n").ok();
+    }
+    if (data.scale < 25) && i.key_pressed(Key::Minus) {
+      data.scale += 1;
+    }
+    if (data.scale > -5) && i.key_pressed(Key::Equals) {
+      data.scale -= 1;
+    }
   });
   data
     .stream
@@ -144,129 +211,235 @@ fn draw_midway(ui: &mut Ui, data: &mut MidwayData) {
     .ok();
   for message in data.rx.try_iter() {
     match message {
-      MidwayMessage::Ship(name, position) => data.ships.insert(name.to_string(), position),
-      MidwayMessage::Sunk(name) => data.ships.remove(&name),
+      MidwayMessage::Ship(name, position) => {
+        data.ships.insert(name.to_string(), position);
+      }
+      MidwayMessage::Sunk(name) => {
+        data.ships.remove(&name);
+      }
+      MidwayMessage::Radius(radius) => data.radius = Some(radius),
     };
   }
   let painter = ui.painter();
-  let offset = match data.ships.get(&data.name) {
-    Some((ship, _)) => SCREEN_SIZE / 2.0 - *ship,
-    None => Vec2::ZERO,
+  let ship_coords = match data.ships.get(&data.name) {
+    Some(ship) => ship.coords,
+    None => Pos2::ZERO,
   };
-  let x_offset_modulo = offset.x % 100.0;
-  for x in 0..=12_i16 {
-    let x = f32::from(x) * 100.0 + x_offset_modulo;
-    painter.line_segment(
-      [pos2(x, 0.0), pos2(x, SCREEN_SIZE.y)],
-      PathStroke::new(2.0, Color32::BLUE),
-    );
+  let scale = 0.9_f32.powi(data.scale);
+  let render_state = RenderState::new(scale, ship_coords, screen_size / 2.0);
+  let top_left = render_state.reverse_transform(Pos2::ZERO);
+  let bottom_right = render_state.reverse_transform(screen_size);
+  // Show the map
+  if let Some(radius) = data.radius {
+    let center = render_state.transform(Pos2::ZERO);
+    let radius = render_state.scale(radius);
+    painter.circle_filled(center, radius, Color32::DARK_BLUE);
   }
-  let y_offset_modulo = offset.y % 100.0;
-  for y in 0..=8_i16 {
-    let y = f32::from(y) * 100.0 + y_offset_modulo;
-    painter.line_segment(
-      [pos2(0.0, y), pos2(SCREEN_SIZE.x, y)],
-      PathStroke::new(2.0, Color32::BLUE),
-    );
+  // High quality ocean texture
+  let Vec2 {
+    x: delta_x,
+    y: delta_y,
+  } = bottom_right - top_left;
+  let x_wave_count = (delta_x / LINE_INTERVAL) as i32;
+  let y_wave_count = (delta_y / LINE_INTERVAL) as i32;
+  let x_offset_modulo = f32::ceil(top_left.x / LINE_INTERVAL) * LINE_INTERVAL;
+  for x in 0..=x_wave_count {
+    let x = (x as f32).mul_add(LINE_INTERVAL, x_offset_modulo);
+    let Pos2 { x, y: _ } = render_state.transform(pos2(x, 0.0));
+    painter.vline(x, 0.0..=screen_size.y, PathStroke::new(2.0, Color32::BLUE));
   }
-  for (ship, (coords, angle)) in &data.ships {
-    let coords = *coords + offset;
+  let y_offset_modulo = f32::ceil(top_left.y / LINE_INTERVAL) * LINE_INTERVAL;
+  for y in 0..=y_wave_count {
+    let y = (y as f32).mul_add(LINE_INTERVAL, y_offset_modulo);
+    let Pos2 { x: _, y } = render_state.transform(pos2(0.0, y));
+    painter.hline(0.0..=screen_size.x, y, PathStroke::new(2.0, Color32::BLUE));
+  }
+  // Ships
+  for (ship, data) in &data.ships {
+    let coords = render_state.transform(data.coords);
+    let scale = render_state.scale(data.size);
     painter.text(
-      coords - vec2(0.0, SHIP_SIZE / 2.0),
-      Align2::CENTER_CENTER,
+      coords - vec2(0.0, scale / 2.0),
+      Align2::CENTER_BOTTOM,
       ship,
-      FontId::default(),
-      Color32::WHITE,
+      FontId::proportional(3.0 * scale.sqrt()),
+      data.colour,
     );
-    let rect = Rect::from_center_size(coords, Vec2::splat(SHIP_SIZE));
-    Image::new(include_image!("../../resources/TestShip.png"))
-      .tint(Color32::GRAY)
-      .rotate(*angle, Vec2::splat(0.5))
+    let rect = Rect::from_center_size(coords, Vec2::splat(scale));
+    Image::new(TEXTURES[data.texture].clone())
+      .tint(data.colour)
+      .rotate(data.angle, Vec2::splat(0.5))
       .paint_at(ui, rect);
-  }
-  painter.line_segment(
-    [pos2(0.0, 650.0), pos2(20.0, 650.0)],
-    PathStroke::new(1.0, Color32::WHITE),
-  );
-  painter.line_segment(
-    [pos2(0.0, 750.0), pos2(20.0, 750.0)],
-    PathStroke::new(1.0, Color32::WHITE),
-  );
-  match data.ship_data.power.total_cmp(&0.0) {
-    Ordering::Greater => {
-      let rect = Rect {
-        min: pos2(0.0, 750.0 - 100.0 * data.ship_data.power),
-        max: pos2(20.0, 750.0),
+    if data.health < 1.0 {
+      let height = scale.sqrt();
+      let width = 10.0 * height;
+      let baseline = coords + vec2(-width / 2.0, scale / 2.0);
+      let current = Rect {
+        min: baseline,
+        max: baseline + vec2(data.health * width, height),
       };
-      painter.rect_filled(rect, Rounding::ZERO, Color32::GREEN);
+      painter.rect_filled(current, Rounding::ZERO, Color32::GREEN);
+      let lost = Rect {
+        min: baseline + vec2(data.health * width, 0.0),
+        max: baseline + vec2(width, height),
+      };
+      painter.rect_filled(lost, Rounding::ZERO, Color32::RED);
+    }
+  }
+  // Location
+  let latitude = match ship_coords.y.total_cmp(&0.0) {
+    Ordering::Greater => {
+      let degrees = (ship_coords.y / LAT_DEGREE_INTERVAL) as i16;
+      let remainder = ship_coords.y % LAT_DEGREE_INTERVAL;
+      let minutes = (remainder / LAT_MINUTE_INTERVAL) as i16;
+      format!("{degrees}° {minutes}' S")
     }
     Ordering::Less => {
-      let rect = Rect {
-        min: pos2(0.0, 750.0),
-        max: pos2(20.0, 750.0 - 100.0 * data.ship_data.power),
-      };
-      painter.rect_filled(rect, Rounding::ZERO, Color32::RED);
+      let degrees = (-ship_coords.y / LAT_DEGREE_INTERVAL) as i16;
+      let remainder = -ship_coords.y % LAT_DEGREE_INTERVAL;
+      let minutes = (remainder / LAT_MINUTE_INTERVAL) as i16;
+      format!("{degrees}° {minutes}' N")
     }
-    Ordering::Equal => (),
+    Ordering::Equal => "0°".to_string(),
+  };
+  let longitude = match ship_coords.x.total_cmp(&0.0) {
+    Ordering::Greater => {
+      let degrees = (ship_coords.x / LONG_DEGREE_INTERVAL) as i16;
+      let remainder = ship_coords.x % LONG_DEGREE_INTERVAL;
+      let minutes = (remainder / LONG_MINUTE_INTERVAL) as i16;
+      format!("{degrees}° {minutes}' E")
+    }
+    Ordering::Less => {
+      let degrees = (-ship_coords.x / LONG_DEGREE_INTERVAL) as i16;
+      let remainder = -ship_coords.x % LONG_DEGREE_INTERVAL;
+      let minutes = (remainder / LONG_MINUTE_INTERVAL) as i16;
+      format!("{degrees}° {minutes}' W")
+    }
+    Ordering::Equal => "0°".to_string(),
+  };
+  painter.text(
+    Pos2::ZERO,
+    Align2::LEFT_TOP,
+    format!("{latitude} {longitude}"),
+    FontId::proportional(20.0),
+    Color32::WHITE,
+  );
+  if let Some(ship) = data.ships.get(&data.name) {
+    // Speed
+    painter.text(
+      pos2(0.0, screen_size.y - 160.0),
+      Align2::LEFT_BOTTOM,
+      format!("{:.2} kt", ship.velocity * 2.0),
+      FontId::proportional(20.0),
+      Color32::WHITE,
+    );
+    // Throttle
+    let top_throttle = screen_size.y - 150.0;
+    painter.line_segment(
+      [pos2(0.0, top_throttle), pos2(20.0, top_throttle)],
+      PathStroke::new(1.0, Color32::WHITE),
+    );
+    let mid_throttle = screen_size.y - 50.0;
+    painter.line_segment(
+      [pos2(0.0, mid_throttle), pos2(20.0, mid_throttle)],
+      PathStroke::new(1.0, Color32::WHITE),
+    );
+    match data.ship_data.power.total_cmp(&0.0) {
+      Ordering::Greater => {
+        let rect = Rect {
+          min: pos2(0.0, mid_throttle - 100.0 * data.ship_data.power),
+          max: pos2(20.0, mid_throttle),
+        };
+        painter.rect_filled(rect, Rounding::ZERO, Color32::GREEN);
+      }
+      Ordering::Less => {
+        let rect = Rect {
+          min: pos2(0.0, mid_throttle),
+          max: pos2(20.0, mid_throttle - 100.0 * data.ship_data.power),
+        };
+        painter.rect_filled(rect, Rounding::ZERO, Color32::RED);
+      }
+      Ordering::Equal => (),
+    }
   }
 }
 
-fn handle_midway_connection(stream: TcpStream, tx: Sender<MidwayMessage>) -> Option<()> {
+fn handle_midway_connection(stream: TcpStream, tx: &Sender<MidwayMessage>) -> Option<()> {
   let mut stream = BufReader::new(stream);
   let mut buf = String::new();
   while let Ok(chars) = stream.read_line(&mut buf) {
     if chars == 0 {
-      None?
+      None?;
     }
     let mut words = buf.split_whitespace();
     match words.next() {
       Some("ship") => {
-        let name = match words.next() {
-          Some(name) => name,
-          None => {
-            println!("Invalid input");
-            buf.clear();
-            continue;
-          }
+        let Some(name) = words.next() else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
         };
-        let x = match words.next().and_then(|w| w.parse().ok()) {
-          Some(x) => x,
-          None => {
-            println!("Invalid input");
-            buf.clear();
-            continue;
-          }
+        let Some(x) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
         };
-        let y = match words.next().and_then(|w| w.parse().ok()) {
-          Some(x) => x,
-          None => {
-            println!("Invalid input");
-            buf.clear();
-            continue;
-          }
+        let Some(y) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
         };
         let coords = pos2(x, y);
-        let angle = match words.next().and_then(|w| w.parse().ok()) {
-          Some(x) => x,
-          None => {
-            println!("Invalid input");
-            buf.clear();
-            continue;
-          }
+        let Some(angle) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
         };
-        tx.send(MidwayMessage::Ship(name.to_string(), (coords, angle)))
-          .ok()?;
+        let Some(velocity) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let size = words.next().and_then(|w| w.parse().ok()).unwrap_or(60.0);
+        let mut texture = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
+        if texture >= TEXTURES.len() {
+          texture = 0;
+        }
+        let colour = words
+          .next()
+          .and_then(|w| Color32::from_hex(w).ok())
+          .unwrap_or(Color32::GRAY);
+        let Some(health) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let ship = Ship {
+          coords,
+          angle,
+          velocity,
+          texture,
+          colour,
+          size,
+          health,
+        };
+        tx.send(MidwayMessage::Ship(name.to_string(), ship)).ok()?;
       }
       Some("sunk") => {
-        let name = match words.next() {
-          Some(name) => name,
-          None => {
-            println!("Invalid input");
-            buf.clear();
-            continue;
-          }
+        let Some(name) = words.next() else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
         };
         tx.send(MidwayMessage::Sunk(name.to_string())).ok()?;
+      }
+      Some("radius") => {
+        let Some(radius) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        tx.send(MidwayMessage::Radius(radius)).ok()?;
       }
       _ => println!("Unknown line"),
     }
@@ -277,9 +450,8 @@ fn handle_midway_connection(stream: TcpStream, tx: Sender<MidwayMessage>) -> Opt
 
 fn main() {
   let viewport = ViewportBuilder::default()
-    .with_min_inner_size(SCREEN_SIZE.to_vec2())
-    .with_max_inner_size(SCREEN_SIZE.to_vec2())
-    .with_resizable(false);
+    .with_inner_size(vec2(1280.0, 800.0))
+    .with_resizable(true);
   let options = NativeOptions {
     viewport,
     ..Default::default()
