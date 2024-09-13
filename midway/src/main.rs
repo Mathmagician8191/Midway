@@ -17,7 +17,7 @@ const PORT: u16 = 25565;
 const TIME_ACCELERATION_FACTOR: f32 = 5.0;
 const TPS: u32 = 60;
 
-const COLOUR: &str = "f00";
+const COLOUR: &str = "#999";
 
 const MAP_RADIUS: Option<f32> = Some(5000.0);
 const KRAKEN_NAME: &str = "Kraken";
@@ -90,13 +90,13 @@ impl Ship {
   }
 
   fn distance_from_origin(&self) -> f32 {
-    (self.coords.0.powi(2) + self.coords.1.powi(2)).sqrt()
+    self.coords.0.hypot(self.coords.1)
   }
 
   fn distance(&self, other: &Self) -> f32 {
     let x_distance = self.coords.0 - other.coords.0;
     let y_distance = self.coords.1 - other.coords.1;
-    (x_distance.powi(2) + y_distance.powi(2)).sqrt()
+    x_distance.hypot(y_distance)
   }
 
   fn damage(&mut self, amount: f32) {
@@ -339,7 +339,8 @@ fn main() {
         let texture = ship.stats.texture;
         let size = ship.stats.length;
         let health = ship.stats.health / ship.stats.mass;
-        let message = format!("ship {name} {x} {y} {angle} {velocity} {size} {texture} {COLOUR} {health}\n");
+        let message =
+          format!("ship {name} {x} {y} {angle} {velocity} {size} {texture} {COLOUR} {health}\n");
         for connection2 in connections.values_mut() {
           connection2.stream.write_all(message.as_bytes()).ok();
         }

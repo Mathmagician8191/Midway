@@ -450,6 +450,7 @@ fn handle_midway_connection(stream: TcpStream, tx: &Sender<MidwayMessage>) -> Op
 
 fn main() {
   let viewport = ViewportBuilder::default()
+    .with_min_inner_size(vec2(480.0, 360.0))
     .with_inner_size(vec2(1280.0, 800.0))
     .with_resizable(true);
   let options = NativeOptions {
