@@ -10,14 +10,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::spawn;
+use std::time::{Duration, Instant};
 
-const LONG_DEGREE_INTERVAL: f32 = 40_000_000.0 / 360.0;
-const LAT_DEGREE_INTERVAL: f32 = 10_000_000.0 / 180.0;
-const LONG_MINUTE_INTERVAL: f32 = LONG_DEGREE_INTERVAL / 60.0;
-const LAT_MINUTE_INTERVAL: f32 = LAT_DEGREE_INTERVAL / 60.0;
-const LINE_INTERVAL: f32 = LAT_MINUTE_INTERVAL;
+const DEGREE_INTERVAL: f32 = 40_000_000.0 / 360.0;
+const MINUTE_INTERVAL: f32 = DEGREE_INTERVAL / 60.0;
+const LINE_INTERVAL: f32 = MINUTE_INTERVAL / 2.0;
 
-const TEXTURES: &[ImageSource] = &[
+const SHIP_TEXTURES: &[ImageSource] = &[
   include_image!("../../resources/Missing.png"),
   include_image!("../../resources/DestroyerEscort.png"),
   include_image!("../../resources/Destroyer.png"),
@@ -27,6 +26,14 @@ const TEXTURES: &[ImageSource] = &[
   include_image!("../../resources/Battleship.png"),
   include_image!("../../resources/LazerKiwi.png"),
   include_image!("../../resources/Kraken.png"),
+  include_image!("../../resources/PTBoat.png"),
+  include_image!("../../resources/Liberty.png"),
+];
+
+const SPRITES: &[ImageSource] = &[
+  include_image!("../../resources/Peg.png"),
+  include_image!("../../resources/Explosion.png"),
+  include_image!("../../resources/Smoke.png"),
 ];
 
 struct Ship {
@@ -49,6 +56,7 @@ enum MidwayMessage {
   Ship(String, Ship),
   Sunk(String),
   Radius(f32),
+  Splash(f32, f32, f32, f32, usize, Color32),
 }
 
 struct MidwayData {
@@ -59,6 +67,7 @@ struct MidwayData {
   radius: Option<f32>,
   ship_data: ShipData,
   ships: HashMap<String, Ship>,
+  splashes: Vec<(f32, f32, f32, Instant, usize, Color32)>,
 }
 
 impl MidwayData {
@@ -71,6 +80,7 @@ impl MidwayData {
       radius: None,
       ship_data: ShipData::default(),
       ships: HashMap::new(),
+      splashes: Vec::new(),
     }
   }
 }
@@ -129,7 +139,16 @@ impl App for Enterprise {
           self.window = Window::Midway(MidwayData::new(name.clone(), rx, stream));
         }
       }
-      Window::Midway(ref mut data) => draw_midway(ui, data),
+      Window::Midway(ref mut data) => {
+        if draw_midway(ui, data).is_none() {
+          self.window = Window::MainMenu(
+            String::new(),
+            String::new(),
+            String::new(),
+            Some("Lost connection to Midway"),
+          );
+        }
+      }
     });
     ctx.request_repaint();
   }
@@ -172,7 +191,7 @@ fn draw_main_menu(
   None
 }
 
-fn draw_midway(ui: &Ui, data: &mut MidwayData) {
+fn draw_midway(ui: &Ui, data: &mut MidwayData) -> Option<()> {
   let screen_size = ui.clip_rect().right_bottom();
   ui.ctx().input(|i| {
     data.ship_data.helm = match (i.key_down(Key::A), i.key_down(Key::D)) {
@@ -198,6 +217,39 @@ fn draw_midway(ui: &Ui, data: &mut MidwayData) {
     if i.key_down(Key::V) {
       data.stream.write_all(b"anchor\n").ok();
     }
+    if i.key_pressed(Key::Backtick) {
+      data.stream.write_all(b"smoke\n").ok();
+    }
+    if i.key_pressed(Key::Num1) {
+      data.stream.write_all(b"weapon 1\n").ok();
+    }
+    if i.key_pressed(Key::Num2) {
+      data.stream.write_all(b"weapon 2\n").ok();
+    }
+    if i.key_pressed(Key::Num3) {
+      data.stream.write_all(b"weapon 3\n").ok();
+    }
+    if i.key_pressed(Key::Num4) {
+      data.stream.write_all(b"weapon 4\n").ok();
+    }
+    if i.key_pressed(Key::Num5) {
+      data.stream.write_all(b"weapon 5\n").ok();
+    }
+    if i.key_pressed(Key::Num6) {
+      data.stream.write_all(b"weapon 6\n").ok();
+    }
+    if i.key_pressed(Key::Num7) {
+      data.stream.write_all(b"weapon 7\n").ok();
+    }
+    if i.key_pressed(Key::Num8) {
+      data.stream.write_all(b"weapon 9\n").ok();
+    }
+    if i.key_pressed(Key::Num9) {
+      data.stream.write_all(b"weapon 9\n").ok();
+    }
+    if i.key_pressed(Key::Num0) {
+      data.stream.write_all(b"weapon 10\n").ok();
+    }
     if (data.scale < 25) && i.key_pressed(Key::Minus) {
       data.scale += 1;
     }
@@ -208,7 +260,7 @@ fn draw_midway(ui: &Ui, data: &mut MidwayData) {
   data
     .stream
     .write_all(format!("sail {} {}\n", data.ship_data.power, data.ship_data.helm).as_bytes())
-    .ok();
+    .ok()?;
   for message in data.rx.try_iter() {
     match message {
       MidwayMessage::Ship(name, position) => {
@@ -218,6 +270,14 @@ fn draw_midway(ui: &Ui, data: &mut MidwayData) {
         data.ships.remove(&name);
       }
       MidwayMessage::Radius(radius) => data.radius = Some(radius),
+      MidwayMessage::Splash(x, y, size, duration, texture, colour) => data.splashes.push((
+        x,
+        y,
+        size,
+        Instant::now() + Duration::from_secs_f32(duration),
+        texture,
+        colour,
+      )),
     };
   }
   let painter = ui.painter();
@@ -266,7 +326,7 @@ fn draw_midway(ui: &Ui, data: &mut MidwayData) {
       data.colour,
     );
     let rect = Rect::from_center_size(coords, Vec2::splat(scale));
-    Image::new(TEXTURES[data.texture].clone())
+    Image::new(SHIP_TEXTURES[data.texture].clone())
       .tint(data.colour)
       .rotate(data.angle, Vec2::splat(0.5))
       .paint_at(ui, rect);
@@ -286,33 +346,46 @@ fn draw_midway(ui: &Ui, data: &mut MidwayData) {
       painter.rect_filled(lost, Rounding::ZERO, Color32::RED);
     }
   }
+  // Splashes
+  let now = Instant::now();
+  data
+    .splashes
+    .retain(|(x, y, size, duration, texture, colour)| {
+      let coords = render_state.transform(pos2(*x, *y));
+      let scale = render_state.scale(*size);
+      let rect = Rect::from_center_size(coords, Vec2::splat(scale));
+      Image::new(SPRITES[*texture].clone())
+        .tint(*colour)
+        .paint_at(ui, rect);
+      now < *duration
+    });
   // Location
   let latitude = match ship_coords.y.total_cmp(&0.0) {
     Ordering::Greater => {
-      let degrees = (ship_coords.y / LAT_DEGREE_INTERVAL) as i16;
-      let remainder = ship_coords.y % LAT_DEGREE_INTERVAL;
-      let minutes = (remainder / LAT_MINUTE_INTERVAL) as i16;
+      let degrees = (ship_coords.y / DEGREE_INTERVAL) as i16;
+      let remainder = ship_coords.y % DEGREE_INTERVAL;
+      let minutes = (remainder / MINUTE_INTERVAL) as i16;
       format!("{degrees}° {minutes}' S")
     }
     Ordering::Less => {
-      let degrees = (-ship_coords.y / LAT_DEGREE_INTERVAL) as i16;
-      let remainder = -ship_coords.y % LAT_DEGREE_INTERVAL;
-      let minutes = (remainder / LAT_MINUTE_INTERVAL) as i16;
+      let degrees = (-ship_coords.y / DEGREE_INTERVAL) as i16;
+      let remainder = -ship_coords.y % DEGREE_INTERVAL;
+      let minutes = (remainder / MINUTE_INTERVAL) as i16;
       format!("{degrees}° {minutes}' N")
     }
     Ordering::Equal => "0°".to_string(),
   };
   let longitude = match ship_coords.x.total_cmp(&0.0) {
     Ordering::Greater => {
-      let degrees = (ship_coords.x / LONG_DEGREE_INTERVAL) as i16;
-      let remainder = ship_coords.x % LONG_DEGREE_INTERVAL;
-      let minutes = (remainder / LONG_MINUTE_INTERVAL) as i16;
+      let degrees = (ship_coords.x / DEGREE_INTERVAL) as i16;
+      let remainder = ship_coords.x % DEGREE_INTERVAL;
+      let minutes = (remainder / MINUTE_INTERVAL) as i16;
       format!("{degrees}° {minutes}' E")
     }
     Ordering::Less => {
-      let degrees = (-ship_coords.x / LONG_DEGREE_INTERVAL) as i16;
-      let remainder = -ship_coords.x % LONG_DEGREE_INTERVAL;
-      let minutes = (remainder / LONG_MINUTE_INTERVAL) as i16;
+      let degrees = (-ship_coords.x / DEGREE_INTERVAL) as i16;
+      let remainder = -ship_coords.x % DEGREE_INTERVAL;
+      let minutes = (remainder / MINUTE_INTERVAL) as i16;
       format!("{degrees}° {minutes}' W")
     }
     Ordering::Equal => "0°".to_string(),
@@ -362,6 +435,7 @@ fn draw_midway(ui: &Ui, data: &mut MidwayData) {
       Ordering::Equal => (),
     }
   }
+  Some(())
 }
 
 fn handle_midway_connection(stream: TcpStream, tx: &Sender<MidwayMessage>) -> Option<()> {
@@ -402,7 +476,7 @@ fn handle_midway_connection(stream: TcpStream, tx: &Sender<MidwayMessage>) -> Op
         };
         let size = words.next().and_then(|w| w.parse().ok()).unwrap_or(60.0);
         let mut texture = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
-        if texture >= TEXTURES.len() {
+        if texture >= SHIP_TEXTURES.len() {
           texture = 0;
         }
         let colour = words
@@ -440,6 +514,38 @@ fn handle_midway_connection(stream: TcpStream, tx: &Sender<MidwayMessage>) -> Op
           continue;
         };
         tx.send(MidwayMessage::Radius(radius)).ok()?;
+      }
+      Some("splash") => {
+        let Some(x) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let Some(y) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let Some(size) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let Some(duration) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let mut texture = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
+        if texture >= SPRITES.len() {
+          texture = 0;
+        }
+        let colour = words
+          .next()
+          .and_then(|w| Color32::from_hex(w).ok())
+          .unwrap_or(Color32::WHITE);
+        tx.send(MidwayMessage::Splash(x, y, size, duration, texture, colour))
+          .ok()?;
       }
       _ => println!("Unknown line"),
     }
