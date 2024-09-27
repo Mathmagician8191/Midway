@@ -342,7 +342,7 @@ fn main() {
             mobile = false;
             kraken_targets.push(name.clone());
           }
-          if distance < ship.stats.gun_range {
+          if !ship.submerged && distance < ship.stats.gun_range {
             match ship.shoot(kraken) {
               ShootingState::Sunk(location, damage) | ShootingState::Hit(location, damage) => {
                 let size = damage.powf(1.0 / 3.0) * 3.0;
