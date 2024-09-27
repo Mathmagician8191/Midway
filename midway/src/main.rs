@@ -296,7 +296,8 @@ fn main() {
                       false
                     } else {
                       sunk.push(name.clone());
-                      ship.velocity *= ship.stats.mass.get_value(false) / ship.stats.mass.get_value(true);
+                      ship.velocity *=
+                        ship.stats.mass.get_value(false) / ship.stats.mass.get_value(true);
                       true
                     }
                   }
