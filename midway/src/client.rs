@@ -10,7 +10,7 @@ pub enum ClientMessage {
   Sail(f32, f32),
   Anchor,
   Smoke,
-  Weapon(u32),
+  Action(usize),
 }
 
 pub struct ClientData {
@@ -90,9 +90,9 @@ fn process_client(mut stream: BufReader<TcpStream>, tx: &Sender<ClientMessage>) 
       }
       Some("anchor") => tx.send(ClientMessage::Anchor).ok()?,
       Some("smoke") => tx.send(ClientMessage::Smoke).ok()?,
-      Some("weapon") => {
-        let weapon = words.next().and_then(|w| w.parse().ok())?;
-        tx.send(ClientMessage::Weapon(weapon)).ok()?;
+      Some("action") => {
+        let action = words.next().and_then(|w| w.parse().ok())?;
+        tx.send(ClientMessage::Action(action)).ok()?;
       }
       Some(word) => println!("Bad message {word} from client"),
       None => println!("Empty message from client"),

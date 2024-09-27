@@ -2,7 +2,29 @@ use enum_iterator::{all, Sequence};
 use random_pick::pick_from_slice;
 use std::ops::Range;
 
-const WEIGHTS: &[usize] = &[15, 25, 4, 3, 1, 1, 1, 1, 10, 10];
+const WEIGHTS: &[usize] = &[15, 25, 4, 3, 1, 1, 1, 1, 10, 10, 10];
+
+#[derive(Clone)]
+pub enum Variable<T> {
+  Surface(T),
+  // surface, submerged
+  Submersible(T, T),
+}
+
+impl<T: Copy> Variable<T> {
+  pub fn get_value(&self, submerged: bool) -> T {
+    match self {
+      Self::Surface(x) => *x,
+      Self::Submersible(x, y) => {
+        if submerged {
+          *y
+        } else {
+          *x
+        }
+      }
+    }
+  }
+}
 
 #[derive(Clone, Copy, Sequence)]
 enum ShipType {
@@ -16,6 +38,12 @@ enum ShipType {
   Bird,
   PTBoat,
   Liberty,
+  UBoat,
+}
+
+#[derive(Clone)]
+pub enum Action {
+  Submerge,
 }
 
 #[derive(Clone)]
@@ -23,11 +51,11 @@ pub struct ShipStats {
   pub texture: usize,
   pub length: f32,
   pub beam: f32,
-  pub mass: f32,
+  pub mass: Variable<f32>,
   pub health: f32,
-  pub power: f32,
+  pub power: Variable<f32>,
   pub k: f32,
-  pub surface_area: f32,
+  pub surface_area: Variable<f32>,
   pub screw_area: f32,
   pub froude_scale_factor: f32,
   pub turning_circle: f32,
@@ -35,6 +63,7 @@ pub struct ShipStats {
   pub gun_range: f32,
   pub gun_reload_time: Range<f32>,
   pub cooldown: f32,
+  pub actions: Vec<Action>,
 }
 
 impl ShipStats {
@@ -52,16 +81,17 @@ impl ShipStats {
     gun_damage: f32,
     gun_range: f32,
     gun_reload_time: Range<f32>,
+    actions: Vec<Action>,
   ) -> Self {
     Self {
       texture,
       length,
       beam,
-      mass,
+      mass: Variable::Surface(mass),
       health: mass,
-      power,
+      power: Variable::Surface(power),
       k,
-      surface_area,
+      surface_area: Variable::Surface(surface_area),
       screw_area,
       froude_scale_factor,
       turning_circle,
@@ -69,6 +99,46 @@ impl ShipStats {
       gun_range,
       gun_reload_time,
       cooldown: 0.0,
+      actions,
+    }
+  }
+
+  pub const fn new_submersible(
+    texture: usize,
+    length: f32,
+    beam: f32,
+    mass_surface: f32,
+    mass_submerged: f32,
+    power_surface: f32,
+    power_submerged: f32,
+    k: f32,
+    surface_area: f32,
+    submerged_area: f32,
+    screw_area: f32,
+    turning_circle: f32,
+    froude_scale_factor: f32,
+    gun_damage: f32,
+    gun_range: f32,
+    gun_reload_time: Range<f32>,
+    actions: Vec<Action>,
+  ) -> Self {
+    Self {
+      texture,
+      length,
+      beam,
+      mass: Variable::Submersible(mass_surface, mass_submerged),
+      health: mass_surface,
+      power: Variable::Submersible(power_surface, power_submerged),
+      k,
+      surface_area: Variable::Submersible(surface_area, submerged_area),
+      screw_area,
+      froude_scale_factor,
+      turning_circle,
+      gun_damage,
+      gun_range,
+      gun_reload_time,
+      cooldown: 0.0,
+      actions,
     }
   }
 }
@@ -78,7 +148,7 @@ fn get_random_type() -> ShipType {
     .expect("Could not generate ship type")
 }
 
-const fn get_stats(ship: ShipType) -> ShipStats {
+fn get_stats(ship: ShipType) -> ShipStats {
   match ship {
     ShipType::Escort => ShipStats::new(
       1,
@@ -94,6 +164,7 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       27.0,
       13400.0,
       0.4..0.44,
+      Vec::new(),
     ),
     ShipType::Destroyer => ShipStats::new(
       2,
@@ -109,6 +180,7 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       125.0,
       16000.0,
       0.8..1.2,
+      Vec::new(),
     ),
     ShipType::LightCruiser => ShipStats::new(
       3,
@@ -124,6 +196,7 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       216.0,
       18288.0,
       0.5..0.625,
+      Vec::new(),
     ),
     ShipType::HeavyCruiser => ShipStats::new(
       4,
@@ -139,6 +212,7 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       512.0,
       27480.0,
       1.33..2.0,
+      Vec::new(),
     ),
     ShipType::BattleCruiser => ShipStats::new(
       5,
@@ -154,6 +228,7 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       3375.0,
       30680.0,
       4.0..6.0,
+      Vec::new(),
     ),
     ShipType::SlowBattleship => ShipStats::new(
       6,
@@ -169,6 +244,7 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       4096.0,
       31364.0,
       4.0..6.0,
+      Vec::new(),
     ),
     ShipType::FastBattleship => ShipStats::new(
       6,
@@ -184,6 +260,7 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       4096.0,
       38700.0,
       2.6..4.0,
+      Vec::new(),
     ),
     ShipType::Bird => ShipStats::new(
       7,
@@ -199,6 +276,7 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       64.0,
       12660.0,
       5.0..6.0,
+      Vec::new(),
     ),
     ShipType::PTBoat => ShipStats::new(
       9,
@@ -214,6 +292,7 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       4.096,
       7160.0,
       0.6..0.75,
+      Vec::new(),
     ),
     ShipType::Liberty => ShipStats::new(
       10,
@@ -229,6 +308,26 @@ const fn get_stats(ship: ShipType) -> ShipStats {
       64.0,
       12660.0,
       5.0..6.0,
+      Vec::new(),
+    ),
+    ShipType::UBoat => ShipStats::new_submersible(
+      11,
+      67.1,
+      6.2,
+      769.0,
+      871.0,
+      1600.0,
+      373.3,
+      0.025,
+      885.4,
+      1307.0,
+      1.62,
+      270.0, // TODO: acquire proper value
+      1.34,
+      42.9,
+      11950.0,
+      3.0..5.0,
+      vec![Action::Submerge],
     ),
   }
 }

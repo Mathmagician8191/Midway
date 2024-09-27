@@ -1,8 +1,8 @@
 //! Server for WW2 naval combat simulator
+use crate::stats::{get_random_ship, Action, ShipStats, Variable};
 use client::{process_joining, ClientData, ClientMessage};
 use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
-use stats::{get_random_ship, ShipStats};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::f32::consts::PI;
@@ -28,14 +28,15 @@ const MAP_RADIUS: Option<(f32, BorderType)> = Some((
     mine_spawn_chance: 0.0001,
     mine_damage: 2000.0,
     scale: 500.0,
-    intensity: 40.0,
-    dps: 1.0,
+    intensity: 18.0,
+    dps: 5.0,
   }),
 ));
 const KRAKEN_NAME: &str = "Kraken";
 
 const WATER_VISCOSITY: f32 = 0.000_001;
 const GRAVITY: f32 = 9.81;
+const GUN_ACCURACY: f32 = 0.01;
 
 #[allow(unused)]
 enum BorderType {
@@ -67,6 +68,7 @@ struct Ship {
   power: f32,
   stats: ShipStats,
   sunk: bool,
+  submerged: bool,
   smoke: bool,
   respawn_cooldown: u32,
 }
@@ -87,6 +89,7 @@ impl Ship {
       power: 0.0,
       stats,
       sunk: false,
+      submerged: false,
       smoke: false,
       respawn_cooldown: RESPAWN_COOLDOWN,
     }
@@ -97,12 +100,14 @@ impl Ship {
     self.angle += delta_t * self.helm * self.velocity * 2.0 / self.stats.turning_circle;
     let reynolds_number = self.stats.length * self.velocity.abs() / WATER_VISCOSITY;
     let c_f = 0.075 / (reynolds_number.log10() - 2.0).powi(2);
-    let c_v = c_f * (1.0 + self.stats.k);
-    let froude_number = self.velocity / (GRAVITY * self.stats.length).sqrt();
-    let c_w = self.stats.froude_scale_factor * froude_number.powi(6);
-    let c_total = c_v + c_w;
-    let r_total = c_total * 0.5 * self.velocity * self.velocity.abs() * self.stats.surface_area;
-    let net_power = self.power * self.stats.power;
+    let mut c_total = c_f * (1.0 + self.stats.k);
+    if !self.submerged {
+      let froude_number = self.velocity / (GRAVITY * self.stats.length).sqrt();
+      let c_w = self.stats.froude_scale_factor * froude_number.powi(6);
+      c_total += c_w;
+    }
+    let r_total = c_total * 0.5 * self.velocity * self.velocity.abs() * self.surface_area();
+    let net_power = self.current_power();
     let q = net_power / self.stats.screw_area;
     let s = q.powi(2) - self.velocity.powi(6) / 27.0;
     let v_out = match s.total_cmp(&0.0) {
@@ -120,19 +125,22 @@ impl Ship {
     };
     let thrust = self.stats.screw_area * v_out * (v_out - self.velocity).abs();
     let net_thrust = thrust - r_total;
-    self.velocity += net_thrust * delta_t / self.stats.mass;
+    self.velocity += net_thrust * delta_t / self.current_mass();
     self.coords.0 += self.velocity * delta_t * self.angle.sin();
     self.coords.1 -= self.velocity * delta_t * self.angle.cos();
   }
 
+  #[must_use]
   fn energy(&self) -> f32 {
-    0.5 * self.stats.mass * self.velocity.powi(2)
+    0.5 * self.current_mass() * self.velocity.powi(2)
   }
 
+  #[must_use]
   fn distance_from_origin(&self) -> f32 {
     self.coords.0.hypot(self.coords.1)
   }
 
+  #[must_use]
   fn distance(&self, other: &Self) -> f32 {
     let x_distance = self.coords.0 - other.coords.0;
     let y_distance = self.coords.1 - other.coords.1;
@@ -149,26 +157,76 @@ impl Ship {
   }
 
   #[must_use]
+  fn random_location(&self) -> (f32, f32) {
+    let mut rng = thread_rng();
+    let max_length_offset = self.stats.length / 2.0;
+    let min_length_offset = -max_length_offset;
+    let max_beam_offset = self.stats.beam / 2.0;
+    let min_beam_offset = -max_beam_offset;
+    let length = rng.gen_range(min_length_offset..max_length_offset);
+    let beam = rng.gen_range(min_beam_offset..max_beam_offset);
+    let x = self.coords.0 + self.angle.sin() * length + self.angle.cos() * beam;
+    let y = self.coords.1 - self.angle.cos() * length + self.angle.sin() * beam;
+    (x, y)
+  }
+
+  #[must_use]
+  fn is_hit(&self, mut x: f32, mut y: f32) -> bool {
+    x -= self.coords.0;
+    y -= self.coords.1;
+    let distance = x.hypot(y);
+    let angle = x.atan2(y) - self.angle;
+    let x_offset = distance * angle.sin();
+    let y_offset = distance * angle.cos();
+    x_offset.abs() <= self.stats.beam / 2.0 && y_offset.abs() <= self.stats.length / 2.0
+  }
+
+  #[must_use]
   fn shoot(&mut self, target: &mut Self) -> ShootingState {
     if self.stats.cooldown <= 0.0 {
+      let target_location = target.random_location();
+      let x_offset = target_location.0 - self.coords.0;
+      let y_offset = target_location.1 - self.coords.1;
       let mut rng = thread_rng();
+      let distance = x_offset.hypot(y_offset) * (1.0 - rng.gen_range(-GUN_ACCURACY..GUN_ACCURACY));
+      let angle = x_offset.atan2(y_offset) + rng.gen_range(-GUN_ACCURACY..GUN_ACCURACY);
+      let x_offset = distance * angle.sin();
+      let y_offset = distance * angle.cos();
+      let coords = (self.coords.0 + x_offset, self.coords.1 + y_offset);
       let damage = self.stats.gun_damage * rng.gen_range(0.5..1.5);
       self.stats.cooldown = rng.gen_range(self.stats.gun_reload_time.clone());
-      if target.damage(damage) {
-        ShootingState::Sunk(damage)
+      if target.is_hit(coords.0, coords.1) {
+        if target.damage(damage) {
+          ShootingState::Sunk(coords, damage)
+        } else {
+          ShootingState::Hit(coords, damage)
+        }
       } else {
-        ShootingState::Hit(damage)
+        ShootingState::Miss(coords, damage)
       }
     } else {
       ShootingState::NotFired
     }
   }
+
+  fn current_power(&self) -> f32 {
+    self.power * self.stats.power.get_value(self.submerged)
+  }
+
+  fn current_mass(&self) -> f32 {
+    self.stats.mass.get_value(self.submerged)
+  }
+
+  fn surface_area(&self) -> f32 {
+    self.stats.surface_area.get_value(self.submerged)
+  }
 }
 
 enum ShootingState {
   NotFired,
-  Hit(f32),
-  Sunk(f32),
+  Miss((f32, f32), f32),
+  Hit((f32, f32), f32),
+  Sunk((f32, f32), f32),
 }
 
 fn handle_join(
@@ -212,24 +270,39 @@ fn main() {
         handle_join(&mut connections, stream, rx, name);
       }
       let mut disconnected = Vec::new();
-      let mut splashes = Vec::new();
+      let mut sunk = Vec::new();
       // get updates from clients
       for (name, connection) in &mut connections {
+        let ship = &mut connection.ship;
         loop {
           match connection.rx.try_recv() {
             Ok(ClientMessage::Sail(power, helm)) => {
-              connection.ship.power = power * power.abs();
-              connection.ship.helm = helm;
+              ship.power = power * power.abs();
+              ship.helm = helm;
             }
             Ok(ClientMessage::Anchor) => {
-              if connection.ship.velocity.abs() < 0.5 {
-                connection.ship.velocity = 0.0;
+              if ship.velocity.abs() < 0.5 {
+                ship.velocity = 0.0;
               }
             }
             Ok(ClientMessage::Smoke) => {
-              connection.ship.smoke = !connection.ship.smoke;
+              ship.smoke = !ship.smoke;
             }
-            Ok(ClientMessage::Weapon(_)) => (),
+            Ok(ClientMessage::Action(action)) => {
+              if let Some(action) = ship.stats.actions.get(action - 1) {
+                match *action {
+                  Action::Submerge => {
+                    ship.submerged = if ship.submerged {
+                      false
+                    } else {
+                      sunk.push(name.clone());
+                      ship.velocity *= ship.stats.mass.get_value(false) / ship.stats.mass.get_value(true);
+                      true
+                    }
+                  }
+                }
+              }
+            }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
               println!("{name} has disconnected");
@@ -247,8 +320,9 @@ fn main() {
           connection.tx.send(format!("sunk {name}\n")).ok();
         }
       }
+      let mut splashes = Vec::new();
+      let mut wakes = Vec::new();
       let mut kraken_targets = Vec::new();
-      let mut sunk = Vec::new();
       for (name, connection) in &mut connections {
         let ship = &mut connection.ship;
         if ship.sunk {
@@ -269,20 +343,17 @@ fn main() {
           }
           if distance < ship.stats.gun_range {
             match ship.shoot(kraken) {
-              ShootingState::Sunk(damage) | ShootingState::Hit(damage) => {
-                let mut rng = thread_rng();
-                let max_offset = kraken.stats.length / 2.0;
-                let min_offset = -max_offset;
-                let splash_x = kraken.coords.0 + rng.gen_range(min_offset..max_offset);
-                let splash_y = kraken.coords.1 + rng.gen_range(min_offset..max_offset);
+              ShootingState::Sunk(location, damage) | ShootingState::Hit(location, damage) => {
                 let size = damage.powf(1.0 / 3.0) * 3.0;
-                splashes.push((splash_x, splash_y, size, 1.0, 0, "f00"));
-                let max_offset = ship.stats.length / 2.0;
-                let min_offset = -max_offset;
-                let location = rng.gen_range(min_offset..max_offset);
-                let splash_x = ship.coords.0 + location * ship.angle.sin();
-                let splash_y = ship.coords.1 - location * ship.angle.cos();
-                splashes.push((splash_x, splash_y, size, 1.0, 1, "fff"));
+                splashes.push((location.0, location.1, size, 1.0, 0, "f00"));
+                let location = ship.random_location();
+                splashes.push((location.0, location.1, size, 1.0, 1, "fff"));
+              }
+              ShootingState::Miss(location, damage) => {
+                let size = damage.powf(1.0 / 3.0) * 3.0;
+                splashes.push((location.0, location.1, size, 1.0, 0, "fff"));
+                let location = ship.random_location();
+                splashes.push((location.0, location.1, size, 1.0, 1, "fff"));
               }
               ShootingState::NotFired => (),
             }
@@ -293,11 +364,27 @@ fn main() {
           splashes.push((
             ship.coords.0,
             ship.coords.1,
-            (ship.power.abs() * ship.stats.power).sqrt() * rng.gen_range(0.5..1.5),
+            ship.current_power().abs().sqrt() * rng.gen_range(0.5..1.5),
             rng.gen_range(30.0..180.0),
             2,
             "0009",
           ));
+        }
+        if !ship.submerged {
+          let mut wake_chance = ship.velocity.abs() * delta_t / 5.0;
+          if wake_chance > 1.0 {
+            wake_chance = 1.0;
+          }
+          if rng.gen_bool(f64::from(wake_chance)) {
+            wakes.push((
+              ship.coords.0,
+              ship.coords.1,
+              ship.stats.beam * 1.5,
+              ship.angle,
+              rng.gen_range(20.0..60.0),
+              ship.velocity.abs() * TIME_ACCELERATION_FACTOR / 3.0,
+            ));
+          }
         }
         ship.step(delta_t);
         if let Some((radius, border)) = MAP_RADIUS {
@@ -320,15 +407,11 @@ fn main() {
                   mine_chance = 1.0;
                 }
                 if rng.gen_bool(f64::from(mine_chance)) {
-                  let max_offset = ship.stats.length / 2.0;
-                  let min_offset = -max_offset;
-                  let location = rng.gen_range(min_offset..max_offset);
-                  let splash_x = ship.coords.0 + location * ship.angle.sin();
-                  let splash_y = ship.coords.1 - location * ship.angle.cos();
+                  let location = ship.random_location();
                   let damage = data.mine_damage * rng.gen_range(0.2..1.0);
                   splashes.push((
-                    splash_x,
-                    splash_y,
+                    location.0,
+                    location.1,
                     damage.powf(1.0 / 3.0) * 3.0,
                     1.0,
                     0,
@@ -337,7 +420,7 @@ fn main() {
                   if ship.damage(damage) {
                     sunk.push(name.clone());
                   }
-                  ship.velocity *= ship.stats.mass / (ship.stats.mass + damage);
+                  ship.velocity *= ship.current_mass() / (ship.current_mass() + damage);
                 }
                 if kraken.is_none()
                   && kraken_cooldown <= 0.0
@@ -364,6 +447,7 @@ fn main() {
                     100.0 * scale_factor_sqrt,
                     100.0 * scale_factor_sqrt,
                     0.5..1.5,
+                    Vec::new(),
                   );
                   let kraken_ship = Ship {
                     coords: (x, y),
@@ -373,6 +457,7 @@ fn main() {
                     power: 0.0,
                     stats,
                     sunk: false,
+                    submerged: false,
                     smoke: false,
                     respawn_cooldown: RESPAWN_COOLDOWN,
                   };
@@ -389,7 +474,7 @@ fn main() {
                   sunk.push(name.clone());
                 }
                 ship.velocity = 0.0;
-                ship.stats.power = 0.0;
+                ship.stats.power = Variable::Surface(0.0);
               }
             }
           }
@@ -408,10 +493,17 @@ fn main() {
           connection.tx.send(message.clone()).ok();
         }
       }
+      for (x, y, size, angle, duration, growth) in wakes {
+        let duration = duration / TIME_ACCELERATION_FACTOR;
+        let message = format!("wake {x} {y} {size} {angle} {duration} {growth}\n");
+        for connection in connections.values_mut() {
+          connection.tx.send(message.clone()).ok();
+        }
+      }
       if let Some(ref mut kraken_ship) = kraken {
         kraken_ship.stats.cooldown -= delta_t;
         if kraken_ship.sunk {
-          kraken_cooldown = kraken_ship.stats.mass / 50.0 + 60.0;
+          kraken_cooldown = kraken_ship.current_mass() / 50.0;
           kraken = None;
           let message = format!("sunk {KRAKEN_NAME}\n");
           for connection in connections.values_mut() {
@@ -420,16 +512,16 @@ fn main() {
         } else if let Some(target) = kraken_targets.choose(&mut thread_rng()) {
           let target_ship = &mut connections.get_mut(target).expect("Missing target").ship;
           match kraken_ship.shoot(target_ship) {
-            ShootingState::Sunk(_) => {
+            ShootingState::Sunk(..) => {
               let message = format!("sunk {target}\n");
               for connection in connections.values_mut() {
                 connection.tx.send(message.clone()).ok();
               }
             }
-            ShootingState::Hit(_) | ShootingState::NotFired => (),
+            ShootingState::Hit(..) | ShootingState::Miss(..) | ShootingState::NotFired => (),
           }
         } else {
-          kraken_cooldown = (kraken_ship.stats.mass - kraken_ship.stats.health) / 100.0 + 30.0;
+          kraken_cooldown = (kraken_ship.current_mass() - kraken_ship.stats.health) / 100.0;
           kraken = None;
           let message = format!("sunk {KRAKEN_NAME}\n");
           for connection in connections.values_mut() {
@@ -438,7 +530,7 @@ fn main() {
         }
       }
       let mut ships = Vec::new();
-      for (name, connection) in &mut connections {
+      for (name, connection) in &connections {
         ships.push((name.clone(), connection.ship.clone()));
       }
       if let Some(ref kraken) = kraken {
@@ -450,14 +542,18 @@ fn main() {
         let velocity = ship.velocity;
         let texture = ship.stats.texture;
         let size = ship.stats.length;
-        let mut health = ship.stats.health / ship.stats.mass;
+        let mut health = ship.stats.health / ship.current_mass();
         if health < 0.0 {
           health = 0.0;
         }
         let message =
           format!("ship {name} {x} {y} {angle} {velocity} {size} {texture} #{COLOUR} {health}\n");
-        for connection2 in connections.values_mut() {
-          connection2.tx.send(message.clone()).ok();
+        if ship.submerged && !ship.sunk {
+          connections[&name].tx.send(message).ok();
+        } else {
+          for connection2 in connections.values() {
+            connection2.tx.send(message.clone()).ok();
+          }
         }
       }
       if connections.is_empty() {

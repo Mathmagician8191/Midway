@@ -28,6 +28,7 @@ const SHIP_TEXTURES: &[ImageSource] = &[
   include_image!("../../resources/Kraken.png"),
   include_image!("../../resources/PTBoat.png"),
   include_image!("../../resources/Liberty.png"),
+  include_image!("../../resources/UBoat.png"),
 ];
 
 const SPRITES: &[ImageSource] = &[
@@ -35,6 +36,8 @@ const SPRITES: &[ImageSource] = &[
   include_image!("../../resources/Explosion.png"),
   include_image!("../../resources/Smoke.png"),
 ];
+
+const WAKE: ImageSource = include_image!("../../resources/Wake.png");
 
 struct Ship {
   coords: Pos2,
@@ -57,6 +60,7 @@ enum MidwayMessage {
   Sunk(String),
   Radius(f32),
   Splash(f32, f32, f32, f32, usize, Color32),
+  Wake(f32, f32, f32, f32, f32, f32),
 }
 
 struct MidwayData {
@@ -68,6 +72,7 @@ struct MidwayData {
   ship_data: ShipData,
   ships: HashMap<String, Ship>,
   splashes: Vec<(f32, f32, f32, Instant, usize, Color32)>,
+  wakes: Vec<(f32, f32, f32, f32, Instant, f32, f32)>,
 }
 
 impl MidwayData {
@@ -81,6 +86,7 @@ impl MidwayData {
       ship_data: ShipData::default(),
       ships: HashMap::new(),
       splashes: Vec::new(),
+      wakes: Vec::new(),
     }
   }
 }
@@ -221,34 +227,34 @@ fn draw_midway(ui: &Ui, data: &mut MidwayData) -> Option<()> {
       data.stream.write_all(b"smoke\n").ok();
     }
     if i.key_pressed(Key::Num1) {
-      data.stream.write_all(b"weapon 1\n").ok();
+      data.stream.write_all(b"action 1\n").ok();
     }
     if i.key_pressed(Key::Num2) {
-      data.stream.write_all(b"weapon 2\n").ok();
+      data.stream.write_all(b"action 2\n").ok();
     }
     if i.key_pressed(Key::Num3) {
-      data.stream.write_all(b"weapon 3\n").ok();
+      data.stream.write_all(b"action 3\n").ok();
     }
     if i.key_pressed(Key::Num4) {
-      data.stream.write_all(b"weapon 4\n").ok();
+      data.stream.write_all(b"action 4\n").ok();
     }
     if i.key_pressed(Key::Num5) {
-      data.stream.write_all(b"weapon 5\n").ok();
+      data.stream.write_all(b"action 5\n").ok();
     }
     if i.key_pressed(Key::Num6) {
-      data.stream.write_all(b"weapon 6\n").ok();
+      data.stream.write_all(b"action 6\n").ok();
     }
     if i.key_pressed(Key::Num7) {
-      data.stream.write_all(b"weapon 7\n").ok();
+      data.stream.write_all(b"action 7\n").ok();
     }
     if i.key_pressed(Key::Num8) {
-      data.stream.write_all(b"weapon 9\n").ok();
+      data.stream.write_all(b"action 9\n").ok();
     }
     if i.key_pressed(Key::Num9) {
-      data.stream.write_all(b"weapon 9\n").ok();
+      data.stream.write_all(b"action 9\n").ok();
     }
     if i.key_pressed(Key::Num0) {
-      data.stream.write_all(b"weapon 10\n").ok();
+      data.stream.write_all(b"action 10\n").ok();
     }
     if (data.scale < 25) && i.key_pressed(Key::Minus) {
       data.scale += 1;
@@ -278,6 +284,11 @@ fn draw_midway(ui: &Ui, data: &mut MidwayData) -> Option<()> {
         texture,
         colour,
       )),
+      MidwayMessage::Wake(x, y, size, angle, duration, velocity) => {
+        data
+          .wakes
+          .push((x, y, size, angle, Instant::now(), duration, velocity))
+      }
     };
   }
   let painter = ui.painter();
@@ -314,6 +325,19 @@ fn draw_midway(ui: &Ui, data: &mut MidwayData) -> Option<()> {
     let Pos2 { x: _, y } = render_state.transform(pos2(0.0, y));
     painter.hline(0.0..=screen_size.x, y, PathStroke::new(2.0, Color32::BLUE));
   }
+  // Wakes
+  data
+    .wakes
+    .retain(|(x, y, size, angle, instant, duration, velocity)| {
+      let coords = render_state.transform(pos2(*x, *y));
+      let elapsed = instant.elapsed().as_secs_f32();
+      let scale = render_state.scale(*size + velocity * elapsed);
+      let rect = Rect::from_center_size(coords, Vec2::splat(scale));
+      Image::new(WAKE)
+        .rotate(*angle, Vec2::splat(0.5))
+        .paint_at(ui, rect);
+      elapsed <= *duration
+    });
   // Ships
   for (ship, data) in &data.ships {
     let coords = render_state.transform(data.coords);
@@ -545,6 +569,40 @@ fn handle_midway_connection(stream: TcpStream, tx: &Sender<MidwayMessage>) -> Op
           .and_then(|w| Color32::from_hex(w).ok())
           .unwrap_or(Color32::WHITE);
         tx.send(MidwayMessage::Splash(x, y, size, duration, texture, colour))
+          .ok()?;
+      }
+      Some("wake") => {
+        let Some(x) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let Some(y) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let Some(size) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let Some(angle) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let Some(duration) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        let Some(velocity) = words.next().and_then(|w| w.parse().ok()) else {
+          println!("Invalid input");
+          buf.clear();
+          continue;
+        };
+        tx.send(MidwayMessage::Wake(x, y, size, angle, duration, velocity))
           .ok()?;
       }
       _ => println!("Unknown line"),
